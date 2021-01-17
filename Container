@@ -1,0 +1,288 @@
+#include<Wire.h>
+#include<Adafruit_BMP280.h>
+#include<stdlib.h>
+#include <Adafruit_GPS.h>//GPS
+#include <SoftwareSerial.h>
+
+SoftwareSerial mySerial(8, 7);
+Adafruit_GPS GPS(&mySerial);
+Adafruit_BMP280 bmp;  //I2C
+float altitude, temp;
+long gyroX, gyroY, gyroZ;
+float rotX, rotY, rotZ;
+float rpmX,rpmY,rpmZ;
+int packet_countcontainer=0;
+int packet_count=0;
+int packetcount1=0;
+int packetcount2=0;
+char altstr[5];
+char tempstr[5];
+char packstr[5];
+struct gps_{
+  int sats = 0;
+  char longit[10] = "NONE";
+  char latit[10] = "NONE";
+  char longd = '0';
+  char lattd = '0';
+  char alt[7] = "NONE";
+  struct gps_time{
+    char hh[3] = "xx";
+    char mm[3] = "xx";
+    char ss[3] = "xx";
+  }tt;
+}gps;
+uint32_t timer = millis();
+uint32_t timer2 = millis();
+
+// Set GPSECHO to 'false' to turn off echoing the GPS data to the Serial console
+// Set to 'true' if you want to debug and listen to the raw GPS sentences
+#define GPSECHO  false
+
+void setup() {
+  Serial.begin(115200);
+  
+  setupgps();//GPS
+  Wire.begin();//RPM Measurement
+  bmp1();
+  setupMPU();
+  
+}
+
+void loop() {
+    Serial.print("0000,");//Team ID
+    Serial.print(" ,");//Mission Time
+    packet_count++;
+    String strmain;
+    strmain=String(packet_count);
+    Serial.println(strmain);
+    Serial.print(",");
+    Serial.print("S1,");//science payload 1 
+    delay(115200);
+    BMPMeasurement();
+    recordGyroRegisters();//RPM Measurement
+    RPMMeasurement();
+    gpsloop();
+    gpsdata();
+    gpsprint();
+}
+
+void bmp1(){
+  if (!bmp.begin(0x76)) {
+    while (1);
+  }
+
+  /* Default settings from datasheet. */
+  bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,     /* Operating Mode. */
+                  Adafruit_BMP280::SAMPLING_X2,     /* Temp. oversampling */
+                  Adafruit_BMP280::SAMPLING_X16,    /* Pressure oversampling */
+                  Adafruit_BMP280::FILTER_X16,      /* Filtering. */
+                  Adafruit_BMP280::STANDBY_MS_500); /* Standby time. */
+}               
+void setupMPU(){
+  Wire.beginTransmission(0b1101000); //This is the I2C address of the MPU (b1101000/b1101001 for AC0 low/high datasheet sec. 9.2)
+  Wire.write(0x6B); //Accessing the register 6B - Power Management (Sec. 4.28)
+  Wire.write(0b00000000); //Setting SLEEP register to 0. (Required; see Note on p. 9)
+  Wire.endTransmission();  
+  Wire.beginTransmission(0b1101000); //I2C address of the MPU
+  Wire.write(0x1B); //Accessing the register 1B - Gyroscope Configuration (Sec. 4.4) 
+  Wire.write(0x00000000); //Setting the gyro to full scale +/- 250deg./s 
+  Wire.endTransmission(); 
+  Wire.beginTransmission(0b1101000); //I2C address of the MPU
+  Wire.write(0x1C); //Accessing the register 1C - Acccelerometer Configuration (Sec. 4.5) 
+  Wire.write(0b00000000); //Setting the accel to +/- 2g
+  Wire.endTransmission(); 
+}
+void recordGyroRegisters() {
+  Wire.beginTransmission(0b1101000); //I2C address of the MPU
+  Wire.write(0x43); //Starting register for Gyro Readings
+  Wire.endTransmission();
+  Wire.requestFrom(0b1101000,6); //Request Gyro Registers (43 - 48)
+  while(Wire.available() < 6);
+  gyroX = Wire.read()<<8|Wire.read(); //Store first two bytes into accelX
+  gyroY = Wire.read()<<8|Wire.read(); //Store middle two bytes into accelY
+  gyroZ = Wire.read()<<8|Wire.read(); //Store last two bytes into accelZ
+  processGyroData();
+}
+
+void processGyroData() {
+  rotX = gyroX / 131.0;
+  rpmX=rotX/6;
+  rotY = gyroY / 131.0; 
+  rpmY=rotY/6;
+  rotZ = gyroZ / 131.0;
+  rpmZ=rotZ/6;
+}
+void RPMMeasurement() {
+  Serial.print(" X=");
+  String x1;
+  x1=String(rpmX);
+  Serial.println(x1);
+  Serial.print(" Y=");
+  String x2;
+  x2=String(rpmY);
+  Serial.println(x2);
+  Serial.print(" Z=");
+  String x3;
+  x3=String(rpmZ);
+  Serial.println(x3);
+}
+void BMPMeasurement()
+{
+    temp=bmp.readTemperature();
+    dtostrf(temp,5,1,tempstr);
+    altitude=bmp.readAltitude(1013.25);
+    dtostrf(altitude,5,1,altstr);
+    Serial.println(altstr);
+    Serial.println(tempstr);
+    
+}
+void setupgps()
+{ 
+  delay(500);
+  Serial.println("Inside gps setup!");
+
+  // 9600 NMEA is the default baud rate for Adafruit MTK GPS's- some use 4800
+  GPS.begin(9600);
+
+  // uncomment this line to turn on RMC (recommended minimum) and GGA (fix data) including altitude
+  GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
+  // uncomment this line to turn on only the "minimum recommended" data
+  //GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCONLY);
+
+  // Set the update rate
+  GPS.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);   // 1 Hz update rate
+
+  // Request updates on antenna status, comment out to keep quiet
+  GPS.sendCommand(PGCMD_ANTENNA);
+
+  delay(100);
+  mySerial.println(PMTK_Q_RELEASE);
+}
+
+void gpsloop()                     // run over and over again
+{
+  // fetch data continuosly
+  GPS.read();
+}
+
+void gpsdata()
+{
+    // if a sentence is received, we can check the checksum, parse it...
+    if (GPS.newNMEAreceived()) {
+      if (!GPS.parse(GPS.lastNMEA()))   // this also sets the newNMEAreceived() flag to false
+        return;  // we can fail to parse a sentence in which case we should just wait for another
+    }
+
+    // update after 1s of previous update
+     if (millis() - timer > 1000 && GPS.fix==1)
+     {
+      timer = millis();
+      gps.sats = (int)GPS.satellites;
+      dtostrf(GPS.altitude, 5, 1, gps.alt);
+      dtostrf(GPS.longitudeDegrees, 6, 4, gps.longit);
+      dtostrf(GPS.latitudeDegrees, 6, 4, gps.latit);
+      gps.longd = (char)GPS.lon;
+      gps.lattd = (char)GPS.lat;
+      
+      dtostrf(GPS.hour, 2, 0, gps.tt.hh);
+      dtostrf(GPS.minute, 2, 0, gps.tt.mm);
+      dtostrf(GPS.seconds, 2, 0, gps.tt.ss);
+  }
+}
+
+
+void gpsprint()
+{
+   // print after 1s
+   if(millis()-timer2>1000)
+  {
+    timer2 = millis();
+    Serial.print("Time: ");
+    Serial.print(gps.tt.hh[1]);
+    Serial.print(':');
+    Serial.print(gps.tt.mm);
+    Serial.print(':');
+    Serial.println(gps.tt.ss);
+
+    Serial.print("Longitude: ");
+    Serial.print(gps.longit);
+    Serial.println(gps.longd);
+
+    Serial.print("Latitude: ");
+    Serial.print(gps.latit);
+    Serial.println(gps.lattd);
+
+    Serial.print("Altitude: ");
+    Serial.println(gps.alt);
+
+    Serial.print("Sats: ");
+    Serial.println(gps.sats);
+    Serial.print("\n");
+  }
+}
+void containertelemetry()
+{
+Serial.print("0000,");//Team ID
+    Serial.print(" ,");//Mission Time
+    String str1;
+    packet_countcontainer++;
+    str1=String(packet_countcontainer);
+    Serial.println(str1);
+    Serial.print(",");
+String str;
+char C;
+str=String(C);
+Serial.println(str);
+//mode
+//sp1 released
+//sp2 released
+BMPMeasurement();
+int power=6;
+float X=10;
+float battery_voltage=map(X,0,1024,0,power);
+String strin;
+strin=String(battery_voltage);
+Serial.println(strin);
+    gpsloop();
+    gpsdata();
+    gpsprint();
+//software_state
+String str12;
+str12=String(packetcount1);
+Serial.println(str12);
+String str13;
+str13=String(packetcount2);
+Serial.println(str13);
+//cmd_echo
+Serial.print(",");
+}
+void payload1()
+{
+    Serial.print("0000,");//Team ID
+    Serial.print(" ,");//Mission Time
+    packetcount1++;
+    String strpayload1;
+    strpayload1=String(packetcount1);
+    Serial.println(strpayload1);
+    Serial.print(",");
+    Serial.print("S1,");//science payload 1 
+    delay(115200);
+    BMPMeasurement();
+    recordGyroRegisters();//RPM Measurement
+    RPMMeasurement();
+}
+void payload2()
+{
+    Serial.print("0000,");//Team ID
+    Serial.print(" ,");//Mission Time
+    packetcount2++;
+    String strpayload2;
+    strpayload2=String(packetcount2);
+    Serial.println(strpayload2);
+    Serial.print(",");
+    Serial.print("S1,");//science payload 1 
+    delay(115200);
+    BMPMeasurement();
+    recordGyroRegisters();//RPM Measurement
+    RPMMeasurement();
+}
